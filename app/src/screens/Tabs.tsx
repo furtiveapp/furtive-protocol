@@ -236,6 +236,7 @@ export function AccountTab({ address, holdings, onPrivacy, onPhrase, onSignOut }
       <Group title="Security">
         <Item icon={IconKey} title="Recovery phrase" sub="Your 12 words, the key to everything" onClick={onPhrase} />
         <Item title="Rescue tool" sub="Take everything out with your 12 words, even without Furtive" onClick={() => openLink('https://app.furtive.app/rescue')} />
+        <Item title="Open source" sub="The code that holds your money, and who it builds on" onClick={() => openLink('https://github.com/furtiveapp/furtive-protocol')} />
         <Item
           icon={IconEye}
           title="Hide balances"
