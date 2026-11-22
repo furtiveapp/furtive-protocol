@@ -1,0 +1,8 @@
+{
+  "name": "@furtive/contracts",
+  "private": true,
+  "dependencies": {
+    "@zk-kit/lean-imt.sol": "2.0.0",
+    "poseidon-solidity": "0.0.5"
+  }
+}

@@ -1,0 +1,30 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib", "node_modules"]
+solc_version = "0.8.28"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+via_ir = true
+ffi = true
+fs_permissions = [{ access = "read", path = "../circuits/build" }, { access = "read", path = "./test/fixtures" }]
+
+[fuzz]
+runs = 512
+
+[invariant]
+runs = 64
+depth = 64
+
+[rpc_endpoints]
+rh_testnet = "https://rpc.testnet.chain.robinhood.com"
+rh_mainnet = "https://rpc.mainnet.chain.robinhood.com"
+
+# Live chains: link the canonical poseidon-solidity libraries, deployed through the
+# standard CREATE2 proxy at addresses that commit to their exact bytecode.
+[profile.deploy]
+libraries = [
+  "node_modules/poseidon-solidity/PoseidonT3.sol:PoseidonT3:0x3333333C0A88F9BE4fd23ed0536F9B6c427e3B93",
+  "node_modules/poseidon-solidity/PoseidonT4.sol:PoseidonT4:0x4443338EF595F44e0121df4C21102677B142ECF0",
+]

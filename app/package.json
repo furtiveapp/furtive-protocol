@@ -1,0 +1,42 @@
+{
+  "name": "furtive-app",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5173",
+    "build": "tsc --noEmit && vite build",
+    "preview": "npm run build && wrangler dev",
+    "zk": "node scripts/copy-zk.mjs",
+    "deploy": "npm run build && wrangler deploy"
+  },
+  "dependencies": {
+    "@fontsource/geist-sans": "5.1.0",
+    "@fontsource/instrument-serif": "5.1.0",
+    "@noble/hashes": "1.7.1",
+    "@scure/bip39": "1.5.4",
+    "@zk-kit/lean-imt": "2.2.2",
+    "circomlibjs": "0.1.7",
+    "clsx": "2.1.1",
+    "motion": "11.15.0",
+    "poseidon-lite": "^0.3.0",
+    "qrcode-generator": "^1.4.4",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "snarkjs": "0.7.5",
+    "tailwind-merge": "2.6.0",
+    "viem": "2.21.57"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.70.1",
+    "@tailwindcss/vite": "4.1.11",
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "@vitejs/plugin-react": "4.3.4",
+    "tailwindcss": "4.1.11",
+    "typescript": "5.6.3",
+    "vite": "^6.1.0",
+    "vite-plugin-node-polyfills": "0.23.0",
+    "wrangler": "^4.166.0"
+  }
+}

@@ -1,0 +1,33 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Geist Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-serif: "Instrument Serif", Georgia, serif;
+  --color-paper: #F3EFE7;
+  --color-paper-2: #EAE4D8;
+  --color-card: #FBF9F5;
+  --color-ink: #16171B;
+  --color-ink-2: #2A2B31;
+  --color-muted: #6C685F;
+  --color-muted-ink: #A39E94;
+  --color-danger: #B4442C;
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@layer base {
+  html { -webkit-text-size-adjust: 100%; background: var(--color-paper); }
+  body {
+    background: var(--color-paper); color: var(--color-ink); font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased; overflow-x: clip; overscroll-behavior: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  ::selection { background: var(--color-ink); color: var(--color-paper); }
+  :focus-visible { outline: 2px solid currentColor; outline-offset: 4px; border-radius: 10px; }
+  input { font: inherit; }
+}
+
+@layer utilities {
+  .serif { font-family: var(--font-serif); font-style: italic; font-weight: 400; letter-spacing: -0.01em; }
+  .tabular { font-variant-numeric: tabular-nums; }
+  .safe-b { padding-bottom: max(20px, env(safe-area-inset-bottom)); }
+}
