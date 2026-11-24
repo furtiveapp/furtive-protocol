@@ -104,13 +104,26 @@ const prove = (params: unknown) => ask<{ proof: unknown; tx: Record<string, unkn
 
 // The relayer's address does not change during a session.
 let info: Promise<{ relayer?: string; error?: string }> | null = null
+// Asked a few times before giving up, so a busy moment on the network never stops a trade.
+async function askInfo() {
+  let last: unknown
+  for (let i = 0; i < 4; i++) {
+    try {
+      const j = await fetch(`${RELAYER_URL}/info`).then((r) => r.json())
+      if (j.relayer) return j
+      last = new Error(j.error || 'relayer not configured')
+    } catch (e) {
+      last = e
+    }
+    await new Promise((r) => setTimeout(r, 600 * (i + 1)))
+  }
+  throw last
+}
 const relayerInfo = () =>
-  (info ??= fetch(`${RELAYER_URL}/info`)
-    .then((r) => r.json())
-    .catch((e) => {
-      info = null
-      throw e
-    }))
+  (info ??= askInfo().catch((e) => {
+    info = null
+    throw e
+  }))
 
 // The pool's notes, kept from the last read. A trade reuses them when the pool has
 // not changed since, instead of reading its whole history again.
@@ -127,6 +140,7 @@ const TREE_SIZE_ABI = parseAbi(['function treeSize() view returns (uint256)'])
 
 const json = (v: unknown) => JSON.parse(JSON.stringify(v, (_, x) => (typeof x === 'bigint' ? x.toString() : x)))
 
+export { relayerInfo }
 export type Stage = 'preparing' | 'proving' | 'sending' | 'done'
 
 type Ext = {
@@ -148,7 +162,28 @@ type Ext = {
  * as `ext` says (to a wallet, or into a swap), and keeps the change as a new
  * private note. The relayer only delivers it and pays the gas.
  */
-async function privateTx(
+// While a private transaction is in flight the chain is half-updated; balance
+// refreshes wait until it lands, so the number never jumps through odd values.
+let inFlight = 0
+export const txInFlight = () => inFlight > 0
+
+export async function privateTx(
+  account: Account,
+  notes: OwnedNote[],
+  asset: Address,
+  amount: bigint,
+  makeExt: (relayer: Address, sealed: readonly [`0x${string}`, `0x${string}`]) => Promise<Ext>,
+  onStage: (s: Stage) => void,
+) {
+  inFlight++
+  try {
+    return await privateTxInner(account, notes, asset, amount, makeExt, onStage)
+  } finally {
+    inFlight--
+  }
+}
+
+async function privateTxInner(
   account: Account,
   notes: OwnedNote[],
   asset: Address,
@@ -177,10 +212,12 @@ async function privateTx(
 
   // If sending fails for a reason that is not the person's (the pool moved on, or the
   // network dropped a request), read the pool fresh and try once more by itself.
-  let body: { hash?: string; confirmed?: boolean; reverted?: boolean; error?: string } = {}
+  let body: { hash?: string; confirmed?: boolean; reverted?: boolean; error?: string; orderId?: string } = {}
   for (let attempt = 0; attempt < 2; attempt++) {
+    // a retry keeps the step already on screen, so progress never jumps backwards
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 1500))
     const state = await vault(attempt > 0)
-    onStage('proving')
+    if (attempt === 0) onStage('proving')
     const { proof, tx } = await prove({
       wasm: ZK.wasm,
       zkey: ZK.zkey,
@@ -192,7 +229,7 @@ async function privateTx(
       extDataHash,
     })
 
-    onStage('sending')
+    if (attempt === 0) onStage('sending')
     const res = await fetch(`${RELAYER_URL}/relay`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -206,7 +243,7 @@ async function privateTx(
   if (body.reverted) throw new Error('The trade did not go through. Nothing was spent.')
   if (!body.confirmed) await client.waitForTransactionReceipt({ hash: body.hash as `0x${string}` })
   onStage('done')
-  return body.hash as string
+  return { hash: body.hash as string, orderId: body.orderId }
 }
 
 const deadline = () => BigInt(Math.floor(Date.now() / 1000) + 600)
@@ -226,7 +263,7 @@ export function sendOut(account: Account, notes: OwnedNote[], amount: bigint, to
     adapterData: '0x',
     encryptedOutputs: sealed,
     encryptedSwapNote: '0x',
-  }), onStage)
+  }), onStage).then((r) => r.hash)
 }
 
 /**
@@ -255,7 +292,7 @@ export function trade(
       // the amount bought is stated by the chain; the backup only carries the secret
       encryptedSwapNote: await sealNote(account.viewKey, { blinding: out.blinding, amount: 0n, asset: BigInt(o.assetOut) }),
     }
-  }, onStage)
+  }, onStage).then((r) => r.hash)
 }
 
 // ──────────────────────────────────────────────────────────── Telegram alerts
@@ -300,7 +337,11 @@ export async function ethUsd(): Promise<number | null> {
 }
 
 export type Activity = {
-  kind: 'add' | 'send' | 'buy' | 'sell'
+  kind: 'add' | 'send' | 'buy' | 'sell' | 'order'
+  /** orders: what was set, like "Stop-loss on TSLA" */
+  label?: string
+  /** money coming back in (an order cancelled, expired or filled) */
+  incoming?: boolean
   amount: string
   to?: string
   symbol?: string
@@ -335,6 +376,7 @@ export function friendly(e: unknown): string {
   const m = (e instanceof Error ? e.message : String(e)).toLowerCase()
   if (m.includes('insufficient') || m.includes('exceeds the balance')) return 'Not enough ETH to cover this and its fee.'
   if (m.includes('relayer not configured')) return 'Sending is paused for a moment. Try again shortly.'
+  if (m.includes('429') || m.includes('too many') || m.includes('http request failed')) return 'The network is busy right now. Nothing was sent, so try again in a few seconds.'
   if (m.includes('fetch') || m.includes('network') || m.includes('timeout')) return 'Could not reach the network. Check your connection.'
   if (m.includes('notes') && m.includes('spread')) return 'Your balance is split across several notes. Send a smaller amount for now.'
   if (m.includes('not enough private balance')) return 'Not enough private balance.'

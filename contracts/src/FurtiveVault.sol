@@ -10,6 +10,11 @@ interface IERC20Min {
     function balanceOf(address) external view returns (uint256);
 }
 
+/// @dev Uniswap v4 PoolManager exposes its storage for reading pool prices.
+interface IPoolStateReader {
+    function extsload(bytes32 slot) external view returns (bytes32);
+}
+
 /**
  * @title FurtiveVault
  * @notice A private balance for each user, held as notes that only the user's
@@ -35,7 +40,16 @@ interface IERC20Min {
  * code: nobody can raise, lower or switch off a limit. Limits never apply to
  * swaps or withdrawals.
  *
- * Invariant: for every asset, balance >= held[asset] + feesOwed[asset].
+ * Orders. A limit order or stop-loss is placed with a normal proof: the amount
+ * leaves the private balance into an order slot here, and only a fingerprint of
+ * its terms is stored. Anyone holding the terms can later fill it, and the vault
+ * itself checks that the trade meets them: the token bought, the least it may
+ * return, the trigger price read from the Uniswap v4 pool, and the expiry. What
+ * comes back becomes a new note under the owner's key. Before expiry only the
+ * owner (who alone knows the cancel key) can cancel; after expiry anyone holding
+ * the terms can, and a cancelled order can only return to the owner as a note.
+ *
+ * Invariant: for every asset, balance >= held[asset] + feesOwed[asset] + escrowed[asset].
  */
 contract FurtiveVault {
     using InternalLeanIMT for LeanIMTData;
@@ -48,6 +62,9 @@ contract FurtiveVault {
     uint256 public constant CAP_PERIOD = 14 days;
     uint256 public constant MAX_DOUBLINGS = 8;
     address internal constant NATIVE = address(0);
+    /// @notice Put in ExtData.adapter to place an order instead of swapping.
+    address public constant ORDER_BOOK = address(uint160(uint256(keccak256("furtive.orders"))));
+    uint256 internal constant POOLS_SLOT = 6; // Uniswap v4 PoolManager: mapping(PoolId => Pool.State)
 
     struct Proof {
         uint256[2] a;
@@ -83,6 +100,30 @@ contract FurtiveVault {
         bytes encryptedSwapNote;
     }
 
+    /// @notice The terms of an order. Only keccak256(abi.encode(terms)) is stored
+    ///         when it is placed, so the terms stay unseen until it is filled.
+    struct OrderTerms {
+        address assetOut; // what to buy
+        uint256 minOut; // the least the whole order may return
+        uint256 outNpk; // proceeds become a note under this key
+        bytes32 outNoteHash; // keccak256 of the sealed note published on fill
+        uint256 cancelNpk; // a cancel returns the funds as a note under this key
+        bytes32 cancelNoteHash; // keccak256 of the sealed note published on cancel
+        bytes32 cancelKeyHash; // keccak256(abi.encode(cancelKey)), known only to the owner
+        uint64 expiry; // no fills after this time; after it anyone may cancel
+        uint8 trigger; // 0 none; 1 fill only when the pool price is at or below; 2 at or above
+        bytes32 poolId; // the Uniswap v4 pool whose price is the trigger
+        uint160 triggerSqrtPrice; // the trigger, as that pool's sqrtPriceX96
+        uint256 fillerFee; // the most the filler may take, in the order's asset
+        uint256 salt; // makes every fingerprint unique
+    }
+
+    struct Order {
+        address asset;
+        uint256 amount;
+        uint256 termsHash;
+    }
+
     struct BaseAsset {
         address asset;
         uint256 perDeposit;
@@ -90,6 +131,7 @@ contract FurtiveVault {
     }
 
     ITransactVerifier public immutable verifier;
+    IPoolStateReader public immutable poolManager;
     address public immutable treasury;
     uint256 public immutable swapFeeBps;
     uint256 public immutable launchedAt;
@@ -110,6 +152,10 @@ contract FurtiveVault {
     mapping(address => uint256) public held;
     /// @notice Swap fees waiting for collectFees, per asset. They back no note.
     mapping(address => uint256) public feesOwed;
+    /// @notice Funds waiting in open orders, per asset.
+    mapping(address => uint256) public escrowed;
+    mapping(uint256 => Order) public orders;
+    uint256 public nextOrderId;
 
     uint256 private _lock;
     bool private _awaitingNative;
@@ -129,6 +175,10 @@ contract FurtiveVault {
         bytes encryptedNote
     );
     event FeesCollected(address indexed asset, uint256 amount);
+    /// @param sealedTerms the terms, encrypted to the owner, so 12 words alone can find and cancel the order
+    event OrderPlaced(uint256 indexed id, address indexed asset, uint256 amount, bytes sealedTerms);
+    event OrderFilled(uint256 indexed id);
+    event OrderCancelled(uint256 indexed id);
 
     error Reentrancy();
     error ZeroAddress();
@@ -151,6 +201,10 @@ contract FurtiveVault {
     error TransferFailed();
     error NativeRefused();
     error NothingToCollect();
+    error NoSuchOrder();
+    error TermsMismatch();
+    error TriggerNotMet();
+    error NotCancellable();
 
     modifier nonReentrant() {
         if (_lock == 1) revert Reentrancy();
@@ -159,13 +213,21 @@ contract FurtiveVault {
         _lock = 0;
     }
 
-    constructor(address verifier_, address treasury_, uint256 swapFeeBps_, BaseAsset memory a, BaseAsset memory b) {
-        if (verifier_ == address(0) || treasury_ == address(0)) revert ZeroAddress();
-        if (verifier_.code.length == 0) revert BadConfig();
+    constructor(
+        address verifier_,
+        address poolManager_,
+        address treasury_,
+        uint256 swapFeeBps_,
+        BaseAsset memory a,
+        BaseAsset memory b
+    ) {
+        if (verifier_ == address(0) || treasury_ == address(0) || poolManager_ == address(0)) revert ZeroAddress();
+        if (verifier_.code.length == 0 || poolManager_.code.length == 0) revert BadConfig();
         if (swapFeeBps_ > MAX_SWAP_FEE_BPS) revert BadConfig();
         if (a.asset == b.asset) revert BadConfig();
         if (a.perDeposit == 0 || a.perDeposit > a.total || b.perDeposit == 0 || b.perDeposit > b.total) revert BadConfig();
         verifier = ITransactVerifier(verifier_);
+        poolManager = IPoolStateReader(poolManager_);
         treasury = treasury_;
         swapFeeBps = swapFeeBps_;
         launchedAt = block.timestamp;
@@ -270,9 +332,89 @@ contract FurtiveVault {
         if (ext.adapter == address(0)) {
             _withdraw(t, ext);
             _pushRoot();
+        } else if (ext.adapter == ORDER_BOOK) {
+            _placeOrder(t, ext);
         } else {
             _swap(t, ext);
         }
+    }
+
+    /// @dev adapterData = abi.encode(termsHash, sealedTerms).
+    function _placeOrder(Transaction calldata t, ExtData calldata ext) private {
+        if (ext.recipient != address(0)) revert BadRecipient();
+        if (ext.relayerFee != 0) _push(t.asset, ext.relayer, ext.relayerFee);
+        uint256 amount = t.publicAmount - ext.relayerFee;
+        if (amount == 0) revert BadAmount();
+        (uint256 termsHash_, bytes memory sealedTerms) = abi.decode(ext.adapterData, (uint256, bytes));
+        if (termsHash_ == 0) revert TermsMismatch();
+        uint256 id = nextOrderId++;
+        orders[id] = Order(t.asset, amount, termsHash_);
+        escrowed[t.asset] += amount;
+        _pushRoot();
+        emit OrderPlaced(id, t.asset, amount, sealedTerms);
+    }
+
+    /**
+     * @notice Fill an open order. Anyone holding its terms may call; the vault checks
+     *         every term itself, so a filler can only make the trade the owner set.
+     * @param encryptedNote the sealed note for the proceeds, fixed by the owner in the terms
+     */
+    function fillOrder(
+        uint256 id,
+        OrderTerms calldata terms,
+        address adapter,
+        bytes calldata adapterData,
+        bytes calldata encryptedNote
+    ) external nonReentrant {
+        Order memory o = orders[id];
+        if (o.amount == 0) revert NoSuchOrder();
+        if (termsHash(terms) != o.termsHash || keccak256(encryptedNote) != terms.outNoteHash) revert TermsMismatch();
+        if (block.timestamp > terms.expiry) revert Expired();
+        if (!triggerMet(terms)) revert TriggerNotMet();
+        if (terms.assetOut == o.asset || adapter == address(this) || adapter.code.length == 0) revert BadSwap();
+        if (terms.outNpk == 0 || terms.outNpk >= FIELD) revert BadNpk();
+
+        delete orders[id];
+        escrowed[o.asset] -= o.amount;
+        uint256 fee = _fee(o.amount);
+        if (fee + terms.fillerFee >= o.amount) revert BadAmount();
+        if (fee != 0) feesOwed[o.asset] += fee;
+        if (terms.fillerFee != 0) _push(o.asset, msg.sender, terms.fillerFee);
+        uint256 amountIn = o.amount - fee - terms.fillerFee;
+
+        uint256 received = _execSwap(o.asset, terms.assetOut, amountIn, terms.minOut, adapter, adapterData);
+        held[terms.assetOut] += received;
+        uint256 commitment = _noteHash(terms.outNpk, terms.assetOut, received);
+        uint256 idx = _insert(commitment);
+        _pushRoot();
+        emit Swapped(o.asset, terms.assetOut, amountIn, received, fee, commitment, idx, encryptedNote);
+        emit OrderFilled(id);
+    }
+
+    /**
+     * @notice Cancel an open order: its funds return to the owner as a private note.
+     *         Before expiry it needs the owner's cancel key; after expiry anyone
+     *         holding the terms may return the funds.
+     */
+    function cancelOrder(uint256 id, OrderTerms calldata terms, bytes32 cancelKey, bytes calldata encryptedNote)
+        external
+        nonReentrant
+    {
+        Order memory o = orders[id];
+        if (o.amount == 0) revert NoSuchOrder();
+        if (termsHash(terms) != o.termsHash || keccak256(encryptedNote) != terms.cancelNoteHash) revert TermsMismatch();
+        if (keccak256(abi.encode(cancelKey)) != terms.cancelKeyHash && block.timestamp <= terms.expiry) revert NotCancellable();
+        if (terms.cancelNpk == 0 || terms.cancelNpk >= FIELD) revert BadNpk();
+
+        delete orders[id];
+        escrowed[o.asset] -= o.amount;
+        held[o.asset] += o.amount;
+        uint256 commitment = _noteHash(terms.cancelNpk, o.asset, o.amount);
+        uint256 idx = _insert(commitment);
+        _pushRoot();
+        // reported as a deposit back into the private balance, so every wallet finds it the usual way
+        emit Deposited(o.asset, o.amount, commitment, idx, encryptedNote);
+        emit OrderCancelled(id);
     }
 
     function _withdraw(Transaction calldata t, ExtData calldata ext) private {
@@ -296,24 +438,31 @@ contract FurtiveVault {
         uint256 amountIn = t.publicAmount - fee - ext.relayerFee;
         if (amountIn == 0) revert BadAmount();
 
-        uint256 before = _balance(ext.assetOut);
-        _awaitingNative = ext.assetOut == NATIVE;
-        if (t.asset == NATIVE) {
-            ISwapAdapter(ext.adapter).swap{value: amountIn}(t.asset, ext.assetOut, amountIn, ext.minOut, ext.adapterData);
-        } else {
-            _push(t.asset, ext.adapter, amountIn);
-            ISwapAdapter(ext.adapter).swap(t.asset, ext.assetOut, amountIn, ext.minOut, ext.adapterData);
-        }
-        _awaitingNative = false;
-        uint256 received = _balance(ext.assetOut) - before;
-        if (received < ext.minOut || received == 0) revert ShortOutput(received, ext.minOut);
-        if (received >= MAX_AMOUNT) revert BadAmount();
-
+        uint256 received = _execSwap(t.asset, ext.assetOut, amountIn, ext.minOut, ext.adapter, ext.adapterData);
         held[ext.assetOut] += received;
         uint256 commitment = _noteHash(ext.outNpk, ext.assetOut, received);
         uint256 idx = _insert(commitment);
         _pushRoot();
         emit Swapped(t.asset, ext.assetOut, amountIn, received, fee, commitment, idx, ext.encryptedSwapNote);
+    }
+
+    /// @dev Sells amountIn of assetIn through adapter; returns exactly what arrived.
+    function _execSwap(address assetIn, address assetOut, uint256 amountIn, uint256 minOut, address adapter, bytes calldata data)
+        private
+        returns (uint256 received)
+    {
+        uint256 before = _balance(assetOut);
+        _awaitingNative = assetOut == NATIVE;
+        if (assetIn == NATIVE) {
+            ISwapAdapter(adapter).swap{value: amountIn}(assetIn, assetOut, amountIn, minOut, data);
+        } else {
+            _push(assetIn, adapter, amountIn);
+            ISwapAdapter(adapter).swap(assetIn, assetOut, amountIn, minOut, data);
+        }
+        _awaitingNative = false;
+        received = _balance(assetOut) - before;
+        if (received < minOut || received == 0) revert ShortOutput(received, minOut);
+        if (received >= MAX_AMOUNT) revert BadAmount();
     }
 
     /// @notice Send an asset's collected swap fees to the fixed treasury. Anyone may call.
@@ -330,6 +479,21 @@ contract FurtiveVault {
     /// @notice The hash a transaction proof commits to for its external data.
     function extDataHash(ExtData calldata ext) public pure returns (uint256) {
         return uint256(keccak256(abi.encode(ext))) % FIELD;
+    }
+
+    /// @notice The fingerprint stored for an order's terms.
+    function termsHash(OrderTerms calldata terms) public pure returns (uint256) {
+        return uint256(keccak256(abi.encode(terms)));
+    }
+
+    /// @notice Whether an order's trigger holds right now, read from the pool itself.
+    function triggerMet(OrderTerms calldata terms) public view returns (bool) {
+        if (terms.trigger == 0) return true;
+        uint160 price = uint160(uint256(poolManager.extsload(keccak256(abi.encode(terms.poolId, POOLS_SLOT)))));
+        if (price == 0) return false;
+        if (terms.trigger == 1) return price <= terms.triggerSqrtPrice;
+        if (terms.trigger == 2) return price >= terms.triggerSqrtPrice;
+        return false;
     }
 
     function isKnownRoot(uint256 root) public view returns (bool) {

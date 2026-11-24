@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import type { Account } from '@sdk/wallet.mjs'
 import { Button, Check, Peeker, Spinner, ease, spring, cn } from '@/components/ui'
-import { ETH, explorerTx } from '@/lib/config'
+import { ETH, LISTED, explorerTx } from '@/lib/config'
 import { friendly, logActivity, trade, type Stage, type Wallet, sendReceipt } from '@/lib/furtive'
 import { bestRoute, checkToken, recentCheck, findToken, listedTokens, parseUnitsSafe, units, VERDICT_TEXT, type Best, type Check as TokenCheck, type Token } from '@/lib/market'
 import { notify, openLink, pasteText, tap, inTelegram, backToChat, oneTap, initData } from '@/lib/telegram'
@@ -19,6 +19,7 @@ export function TradeSheet({
   onLock,
   onDone,
   onRefresh,
+  onOrder,
 }: {
   account: Account
   wallet: Wallet
@@ -26,6 +27,7 @@ export function TradeSheet({
   onLock: (b: boolean) => void
   onDone: () => void
   onRefresh?: () => void
+  onOrder?: (t: Token) => void
 }) {
   const [token, setToken] = useState<Token | null>(start?.token ?? null)
   const [side, setSide] = useState<'buy' | 'sell'>(start?.side ?? 'buy')
@@ -39,7 +41,7 @@ export function TradeSheet({
         </motion.div>
       ) : token ? (
         <motion.div key="trade" initial={{ opacity: 0, x: 24 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 24 }} transition={spring}>
-          <Ticket account={account} wallet={wallet} token={token} side={side} setSide={setSide} initialAmount={start?.amount} auto={start?.auto} expect={start?.expect} onBack={start ? undefined : () => setToken(null)} onLock={onLock} onDone={onDone} onAddFunds={() => (tap('light'), setAdding(true))} />
+          <Ticket account={account} wallet={wallet} token={token} side={side} setSide={setSide} initialAmount={start?.amount} auto={start?.auto} expect={start?.expect} onBack={start ? undefined : () => setToken(null)} onLock={onLock} onDone={onDone} onAddFunds={() => (tap('light'), setAdding(true))} onOrder={onOrder} />
         </motion.div>
       ) : (
         <motion.div key="pick" initial={{ opacity: 0, x: -24 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -24 }} transition={spring}>
@@ -56,10 +58,21 @@ function Picker({ wallet, onPick }: { wallet: Wallet; onPick: (t: Token) => void
   const [listed, setListed] = useState<Token[] | null>(null)
   const [query, setQuery] = useState('')
   const [found, setFound] = useState<Token | null | 'none' | 'loading'>(null)
+  // what you hold: listed tokens are known at once, any other is looked up once
+  const heldAddrs = [...wallet.balance.entries()].filter(([a, v]) => a !== 0n && v > 0n).map(([a]) => '0x' + a.toString(16).padStart(40, '0'))
+  const [held, setHeld] = useState<Token[]>([])
 
   useEffect(() => {
     listedTokens().then(setListed)
   }, [])
+  useEffect(() => {
+    let live = true
+    Promise.all(heldAddrs.map((a) => findToken(a))).then((l) => live && setHeld(l.filter(Boolean) as Token[]))
+    return () => {
+      live = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [heldAddrs.join(',')])
 
   useEffect(() => {
     const q = query.trim()
@@ -72,7 +85,9 @@ function Picker({ wallet, onPick }: { wallet: Wallet; onPick: (t: Token) => void
     }
   }, [query])
 
-  const shown = (listed ?? []).filter((t) => !query || `${t.symbol} ${t.name}`.toLowerCase().includes(query.toLowerCase()))
+  const match = (t: Token) => !query || `${t.symbol} ${t.name}`.toLowerCase().includes(query.toLowerCase())
+  const mine = held.filter(match)
+  const popular = (listed ?? []).filter((t) => match(t) && !held.some((h) => h.address === t.address))
 
   return (
     <div className="pb-2">
@@ -110,7 +125,18 @@ function Picker({ wallet, onPick }: { wallet: Wallet; onPick: (t: Token) => void
             ))}
           </div>
         )}
-        {!found && listed && shown.map((t) => <TokenRow key={t.address} t={t} wallet={wallet} onPick={onPick} />)}
+        {!found && mine.length > 0 && (
+          <>
+            <h3 className="px-1 pt-1 text-[13px] text-muted">Your tokens</h3>
+            {mine.map((t) => <TokenRow key={t.address} t={t} wallet={wallet} onPick={onPick} />)}
+          </>
+        )}
+        {!found && listed && popular.length > 0 && (
+          <>
+            <h3 className={cn('px-1 pt-1 text-[13px] text-muted', mine.length > 0 && 'mt-4')}>{mine.length > 0 ? 'Popular' : 'Popular on testnet'}</h3>
+            {popular.map((t) => <TokenRow key={t.address} t={t} wallet={wallet} onPick={onPick} />)}
+          </>
+        )}
       </div>
     </div>
   )
@@ -161,10 +187,12 @@ function Ticket({
   onAddFunds,
   auto,
   expect,
+  onOrder,
 }: {
   account: Account
   wallet: Wallet
   onAddFunds: () => void
+  onOrder?: (t: Token) => void
   auto?: boolean
   expect?: string
   token: Token
@@ -186,7 +214,9 @@ function Ticket({
   const [text, setText] = useState(initialAmount ?? '')
   const firstSide = useRef(true)
   const [best, setBest] = useState<Best | null | 'loading'>(null)
-  const [check, setCheck] = useState<TokenCheck | null>(() => recentCheck(token))
+  // a token Furtive lists starts as vetted, so the button works at once; the live check
+  // still runs and replaces this within seconds (and would block it if anything changed)
+  const [check, setCheck] = useState<TokenCheck | null>(() => recentCheck(token) ?? (LISTED.some((l) => l.address.toLowerCase() === token.address.toLowerCase()) ? { verdict: 'normal', findings: [{ ok: true, label: 'Listed by Furtive', detail: 'A token Furtive lists, in a pool Furtive opened.' }], at: Date.now() } : null))
   const [stage, setStage] = useState<Stage | null>(null)
   const [hash, setHash] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -220,6 +250,10 @@ function Ticket({
   }, [amount, side, token])
 
   const out = best && best !== 'loading' ? best.out : best === 'loading' ? 'loading' : null
+  // while a new price loads, the last one stays on screen, faded, instead of flashing a spinner
+  const lastOut = useRef<bigint | null>(null)
+  if (typeof out === 'bigint') lastOut.current = out
+  if (!amount) lastOut.current = null
   const minOut = typeof out === 'bigint' ? (out * (10_000n - SLIPPAGE_BPS)) / 10_000n : null
   const ready = amount !== null && !tooMuch && typeof out === 'bigint' && check !== null && check.verdict !== 'skip'
 
@@ -327,7 +361,11 @@ function Ticket({
             </button>
           </motion.p>
         )}
-        {done && <Button className="mt-8" onClick={onDone}>Done</Button>}
+        {done && (
+          <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.35, duration: 0.35, ease }} className="w-full">
+            <Button className="mt-8" onClick={onDone}>Done</Button>
+          </motion.div>
+        )}
         {done && inTelegram() && (
           <button type="button" onClick={() => (tap('light'), backToChat())} className="mt-3 py-2 text-[14.5px] font-medium text-muted">
             Back to chat
@@ -394,7 +432,7 @@ function Ticket({
         <div className="flex items-center justify-between">
           <span className="text-[14px] text-muted">You get about</span>
           <span className="text-[16px] tabular">
-            {out === 'loading' ? <Spinner className="size-3.5 border-[1.5px] text-muted" /> : typeof out === 'bigint' ? `${units(out, outDecimals, 6)} ${outSymbol}` : amount ? 'No price' : '—'}
+            {out === 'loading' ? (lastOut.current !== null ? <span className="opacity-40 transition-opacity">{`${units(lastOut.current, outDecimals, 6)} ${outSymbol}`}</span> : <Spinner className="size-3.5 border-[1.5px] text-muted" />) : typeof out === 'bigint' ? `${units(out, outDecimals, 6)} ${outSymbol}` : amount ? 'No price' : '—'}
           </span>
         </div>
         {typeof out === 'bigint' && minOut !== null && (
@@ -424,6 +462,11 @@ function Ticket({
       </Button>
       )}
       <p className="mt-2.5 text-center text-[12.5px] text-muted-ink">0.3% Furtive fee is included in the price.</p>
+      {onOrder && (
+        <button type="button" onClick={() => (tap('light'), onOrder(token))} className="mx-auto mt-4 block py-1.5 text-[14px] font-medium text-ink underline decoration-ink/30 underline-offset-4">
+          Set an order instead
+        </button>
+      )}
     </div>
   )
 }

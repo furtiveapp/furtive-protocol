@@ -2,6 +2,7 @@
 import { createPublicClient, getAddress, http, isAddress, parseAbi, type Address } from 'viem'
 import { client } from './furtive'
 import { ETH, LISTED, POOL_MANAGER, QUOTER } from './config'
+import { geo } from './markets-api'
 
 export const POOL_KEY = [
   { name: 'currency0', type: 'address' },
@@ -80,6 +81,16 @@ async function discoverRoutes(token: Address, tiers: [number, number][], twoHop 
   return found.sort((a, b) => (a.out > b.out ? -1 : 1))
 }
 
+/**
+ * A token we list, built from what we already know: no chain lookups, so lists
+ * and taps are instant. Its pools are the ones we opened for it.
+ */
+export function listedToken(l: (typeof LISTED)[number]): Token {
+  const address = getAddress(l.address)
+  const routes = l.tiers.map(([fee, tickSpacing]) => [ethPool(address, fee, tickSpacing)])
+  return { address, symbol: l.symbol, name: l.name, decimals: l.decimals ?? 18, route: routes[0], routes, image: l.image, stock: l.stock }
+}
+
 /** A token's details and every route that trades it. Null when none does. */
 export async function findToken(address: string): Promise<Token | null> {
   if (!isAddress(address)) return null
@@ -87,6 +98,11 @@ export async function findToken(address: string): Promise<Token | null> {
   const hit = tokenCache.get(a)
   if (hit) return hit
   const listed = LISTED.find((t) => t.address.toLowerCase() === a.toLowerCase())
+  if (listed) {
+    const t = listedToken(listed)
+    tokenCache.set(a, t)
+    return t
+  }
 
   let symbol: string, name: string, decimals: number
   try {
@@ -99,11 +115,10 @@ export async function findToken(address: string): Promise<Token | null> {
     return null
   }
 
-  // listed tokens trade only in their known pools, never in look-alike pools at odd prices
-  const tiers: [number, number][] = listed ? listed.tiers : TIERS
-  const routes = await discoverRoutes(a, tiers, !listed)
+  // any other token: every common pool, direct and through a stablecoin
+  const routes = await discoverRoutes(a, TIERS, true)
   if (!routes.length) return null
-  const token = { address: a, symbol, name: listed?.name ?? name, decimals: Number(decimals), route: routes[0].route, routes: routes.map((r) => r.route), image: listed?.image, stock: listed?.stock }
+  const token: Token = { address: a, symbol, name, decimals: Number(decimals), route: routes[0].route, routes: routes.map((r) => r.route) }
   tokenCache.set(a, token)
   return token
 }
@@ -124,7 +139,14 @@ export async function bestRoute(t: Token, side: 'buy' | 'sell', amountIn: bigint
   return { route: ok[0].route, out: ok[0].out, next: ok[1]?.out ?? null, checked: candidates.length }
 }
 
-export const listedTokens = () => Promise.all(LISTED.filter((t) => !t.stock).map((t) => findToken(t.address))).then((l) => l.filter(Boolean) as Token[])
+/**
+ * The tokens the app suggests here: Stock Tokens first (their test pools are deep),
+ * where they are allowed, then the rest. Anything else can be pasted by address.
+ */
+export const listedTokens = async () => {
+  const { stocks } = await geo()
+  return [...LISTED.filter((t) => t.stock && stocks), ...LISTED.filter((t) => !t.stock)].map(listedToken)
+}
 
 // ──────────────────────────────────────────────────────────────── token check
 

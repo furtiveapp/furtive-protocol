@@ -9,18 +9,18 @@ export const CHAIN = defineChain({
   blockExplorers: { default: { name: 'Explorer', url: 'https://explorer.testnet.chain.robinhood.com' } },
 })
 
-export const VAULT = '0x4136881594De8661b0d4F005AdAFbce67F2FD018' as const
-export const VAULT_FROM_BLOCK = 156050534n
+export const VAULT = '0x75843C1a45D75F3a1768DbBD191DC7939E3731f5' as const
+export const VAULT_FROM_BLOCK = 157178232n
 export const RELAYER_URL = import.meta.env.VITE_RELAYER_URL || 'http://127.0.0.1:8787'
 export const ETH = '0x0000000000000000000000000000000000000000' as const
-export const ADAPTER = '0xAE13eC8f44F7201764Ba411d716B323DE1174aEe' as const
+export const ADAPTER = '0x9A14Df1Ab1137954b2913C54D60bF740a95A7E89' as const
 export const QUOTER = '0x520B8fC1a687eeD97Ad4015c4242A2111d8332aE' as const
 export const POOL_MANAGER = '0x8366a39CC670B4001A1121B8F6A443A643e40951' as const
 
 /** Tokens the app suggests. Anything else can be found by pasting its address. */
-export type Listed = { address: string; symbol: string; name: string; tiers: [number, number][]; stock?: boolean; image?: string }
+export type Listed = { address: string; symbol: string; name: string; tiers: [number, number][]; stock?: boolean; image?: string; decimals?: number }
 export const LISTED: Listed[] = [
-  { address: '0x05484528197eE66b5165F61521aA4652d6fA8CB1', symbol: 'PEEK', name: 'Peek Test Coin', tiers: [[3000, 60], [500, 10]] },
+  { address: '0xAe3917FD6bF7cf6dD378cd4ba3110BeEd841959f', symbol: 'PEEK', name: 'Peek Test Coin', tiers: [[3000, 60]] },
   // Robinhood Stock Tokens from the testnet faucet, in pools Furtive opened at real mainnet prices.
   { address: '0xC9f9c86933092BbbfFF3CCb4b105A4A94bf3Bd4E', symbol: 'TSLA', name: 'Tesla', tiers: [[2900, 60]], stock: true, image: 'https://coin-images.coingecko.com/coins/images/102174112/large/0x322f0929c4625ed5bad873c95208d54e1c003b2d.png' },
   { address: '0x5884aD2f920c162CFBbACc88C9C51AA75eC09E02', symbol: 'AMZN', name: 'Amazon', tiers: [[2900, 60]], stock: true, image: 'https://coin-images.coingecko.com/coins/images/102174126/large/0x12f190a9f9d7d37a250758b26824b97ce941bf54.png' },

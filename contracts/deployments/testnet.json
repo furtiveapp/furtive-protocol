@@ -1,19 +1,30 @@
 {
   "chainId": 46630,
   "network": "Robinhood Chain testnet",
-  "deployedAt": "2026-11-21",
+  "deployedAt": "2026-11-24",
   "provingKeys": "development (single contribution) - testnet only",
-  "FurtiveVault": "0x4136881594De8661b0d4F005AdAFbce67F2FD018",
-  "UniswapV4Adapter": "0xAE13eC8f44F7201764Ba411d716B323DE1174aEe",
-  "TransactVerifier": "0x834FD041872F0A578cf263A5Af325df01A89939E",
+  "FurtiveVault": "0x75843C1a45D75F3a1768DbBD191DC7939E3731f5",
+  "UniswapV4Adapter": "0x9A14Df1Ab1137954b2913C54D60bF740a95A7E89",
+  "TransactVerifier": "0xE3589489bb86c2a4B43cec0Eb3A7B154A5e3AA6b",
   "PoseidonT3": "0x3333333C0A88F9BE4fd23ed0536F9B6c427e3B93",
   "PoseidonT4": "0x4443338EF595F44e0121df4C21102677B142ECF0",
   "UniswapV4PoolManager": "0x8366a39CC670B4001A1121B8F6A443A643e40951",
   "USDG": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
   "swapFeeBps": 30,
   "treasury": "0x34bB876fc9E7226BeaA180E3d843E2a2494Ea63f",
-  "firstLiveFlow": {
-    "deposit": "0x80f67a19189f0bc9b614ebd56c531686c41872737e7b5e08e201cbc52332d804",
-    "privateWithdrawal": "0x6a45882e8abea25a4317055a239559bdb19aa676920f9a359647bea7ede9db80"
+  "previousVault": {
+    "FurtiveVault": "0x4136881594De8661b0d4F005AdAFbce67F2FD018",
+    "UniswapV4Adapter": "0xAE13eC8f44F7201764Ba411d716B323DE1174aEe",
+    "TransactVerifier": "0x834FD041872F0A578cf263A5Af325df01A89939E",
+    "retiredAt": "2026-11-24",
+    "note": "no orders; funds left here can be withdrawn with the rescue tool by entering this vault address"
+  },
+  "fromBlock": 157178232,
+  "features": "private swaps, withdrawals, limit orders and stop-losses",
+  "PEEK": {
+    "token": "0xAe3917FD6bF7cf6dD378cd4ba3110BeEd841959f",
+    "pool": "ETH/PEEK 0.3%, liquidity concentrated about 0.5x to 2x of 1 ETH = 1,000,000 PEEK",
+    "seeded": "2026-11-24",
+    "retired": "0x05484528197eE66b5165F61521aA4652d6fA8CB1 (pool drained)"
   }
 }

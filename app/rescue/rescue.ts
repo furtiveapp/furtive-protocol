@@ -3,7 +3,8 @@
 // it reads the blockchain directly, makes the proofs on this device, and sends
 // the withdrawals itself, paying the network fee from your own drop-off address
 // (which comes from the same 12 words).
-import { createPublicClient, createWalletClient, defineChain, formatUnits, getAddress, http, parseAbi, type Address, type PublicClient } from 'viem'
+import { createPublicClient, createWalletClient, defineChain, formatUnits, getAddress, http, parseAbi, parseAbiItem, type Address, type PublicClient } from 'viem'
+import { openData } from '@sdk/orders.mjs'
 import { privateKeyToAccount } from 'viem/accounts'
 import { accountFromPhrase, decoyNote } from '@sdk/wallet.mjs'
 import { readVault, findNotes } from '@sdk/chain.mjs'
@@ -16,8 +17,8 @@ export type Network = { chainId: number; rpc: string; vault: Address; fromBlock:
 export const DEFAULT_NETWORK: Network = {
   chainId: 46630,
   rpc: 'https://rpc.testnet.chain.robinhood.com',
-  vault: '0x4136881594De8661b0d4F005AdAFbce67F2FD018',
-  fromBlock: 156050534n,
+  vault: '0x75843C1a45D75F3a1768DbBD191DC7939E3731f5',
+  fromBlock: 157178232n,
   explorer: 'https://explorer.testnet.chain.robinhood.com',
 }
 
@@ -33,8 +34,11 @@ const VAULT_ABI = parseAbi([
 
 type Note = { commitment: bigint; index: bigint; asset: bigint; amount: bigint; blinding: bigint; sk: bigint }
 export type Holding = { asset: Address; symbol: string; decimals: number; amount: bigint; notes: Note[] }
+/** An open private order (limit or stop-loss): cancelled first, so its funds come back. */
+export type OpenOrder = { id: bigint; asset: Address; symbol: string; decimals: number; amount: bigint; terms: unknown; cancelKey: `0x${string}`; backSealed: `0x${string}` }
 export type Found = {
   holdings: Holding[]
+  orders: OpenOrder[]
   /** your drop-off address: pays the network fee for each withdrawal */
   feeAddress: Address
   feeBalance: bigint
@@ -58,6 +62,7 @@ export async function find(phrase: string, net: Network): Promise<Found & { acco
   const [state, feeBalance, gasPrice] = await Promise.all([readVault(pub, net.vault, net.fromBlock), pub.getBalance({ address: feeAddress }), pub.getGasPrice()])
   const feePerWithdrawal = 900_000n * gasPrice * 2n
   const notes = (await findNotes(account, state)) as Note[]
+  const orders = await findOrders(pub, net, account.viewKey)
   const byAsset = new Map<bigint, Note[]>()
   for (const n of notes) byAsset.set(n.asset, [...(byAsset.get(n.asset) ?? []), n])
   const holdings: Holding[] = []
@@ -72,7 +77,42 @@ export async function find(phrase: string, net: Network): Promise<Found & { acco
     holdings.push({ asset, symbol, decimals, amount: list.reduce((s, n) => s + n.amount, 0n), notes: list.sort((x, y) => (x.amount > y.amount ? -1 : 1)) })
   }
   holdings.sort((x, y) => (x.asset === ZERO ? -1 : y.asset === ZERO ? 1 : 0))
-  return { account, holdings, feeAddress, feeBalance, feePerWithdrawal }
+  return { account, holdings, orders, feeAddress, feeBalance, feePerWithdrawal }
+}
+
+const PLACED = parseAbiItem('event OrderPlaced(uint256 indexed id, address indexed asset, uint256 amount, bytes sealedTerms)')
+const ORDERS_ABI = parseAbi([
+  'function orders(uint256 id) view returns (address asset, uint256 amount, uint256 termsHash)',
+  'struct OrderTerms { address assetOut; uint256 minOut; uint256 outNpk; bytes32 outNoteHash; uint256 cancelNpk; bytes32 cancelNoteHash; bytes32 cancelKeyHash; uint64 expiry; uint8 trigger; bytes32 poolId; uint160 triggerSqrtPrice; uint256 fillerFee; uint256 salt; }',
+  'function cancelOrder(uint256 id, OrderTerms terms, bytes32 cancelKey, bytes encryptedNote)',
+])
+
+/**
+ * Your open orders. Every order carries its terms sealed to your view key, so the
+ * 12 words alone recognise it; one still holding funds on the vault is open.
+ */
+async function findOrders(pub: PublicClient, net: Network, viewKey: CryptoKey): Promise<OpenOrder[]> {
+  const latest = await pub.getBlockNumber()
+  const logs = []
+  for (let from = net.fromBlock; from <= latest; from += 5_000_000n) {
+    const to = from + 4_999_999n > latest ? latest : from + 4_999_999n
+    logs.push(...(await pub.getLogs({ address: net.vault, event: PLACED, fromBlock: from, toBlock: to })))
+  }
+  const mine: OpenOrder[] = []
+  for (const l of logs) {
+    const rec = (await openData(viewKey, l.args.sealedTerms as `0x${string}`)) as { terms: unknown; cancelKey: `0x${string}`; backSealed: `0x${string}` } | null
+    if (!rec) continue
+    const [asset, amount] = (await pub.readContract({ address: net.vault, abi: ORDERS_ABI, functionName: 'orders', args: [l.args.id as bigint] })) as [Address, bigint, bigint]
+    if (amount === 0n) continue // filled or cancelled already
+    let symbol = 'ETH'
+    let decimals = 18
+    if (asset !== ZERO) {
+      symbol = await pub.readContract({ address: asset, abi: ERC20, functionName: 'symbol' }).catch(() => 'TOKEN')
+      decimals = await pub.readContract({ address: asset, abi: ERC20, functionName: 'decimals' }).then(Number).catch(() => 18)
+    }
+    mine.push({ id: l.args.id as bigint, asset, symbol, decimals, amount, terms: rec.terms, cancelKey: rec.cancelKey, backSealed: rec.backSealed })
+  }
+  return mine
 }
 
 export const show = (amount: bigint, decimals: number) => {
@@ -95,23 +135,51 @@ export async function rescue(
   files: ProofFiles,
   onStep: (steps: Step[]) => void,
 ): Promise<Step[]> {
-  const { account, holdings } = await find(phrase, net)
+  let { account, holdings, orders } = await find(phrase, net)
   const { chain, pub } = clients(net)
   const signer = privateKeyToAccount(account.depositKey as `0x${string}`)
   const wallet = createWalletClient({ chain, transport: http(net.rpc), account: signer })
 
+  // 1. Open orders first: cancelling returns their funds as notes in your balance.
+  const cancels: Step[] = orders.map((o) => ({ label: `Cancel order: ${show(o.amount, o.decimals)} ${o.symbol}`, state: 'waiting' }))
+  for (let i = 0; i < orders.length; i++) {
+    const o = orders[i]
+    cancels[i] = { ...cancels[i], state: 'working' }
+    onStep([...cancels])
+    try {
+      const { request } = await pub.simulateContract({ address: net.vault, abi: ORDERS_ABI, functionName: 'cancelOrder', args: [o.id, o.terms as never, o.cancelKey, o.backSealed], account: signer })
+      const hash = await wallet.writeContract(request)
+      const receipt = await pub.waitForTransactionReceipt({ hash, timeout: 120_000 })
+      if (receipt.status !== 'success') throw new Error('The network rejected this cancel.')
+      cancels[i] = { ...cancels[i], state: 'done', hash }
+    } catch (e) {
+      const err = e as { shortMessage?: string; message?: string }
+      const msg = err.shortMessage || err.message || 'failed'
+      cancels[i] = { ...cancels[i], state: 'failed', error: /insufficient funds|exceeds the balance/i.test(msg) ? 'Not enough ETH at your drop-off address for the network fee.' : msg.slice(0, 200) }
+      onStep([...cancels])
+      return cancels
+    }
+    onStep([...cancels])
+  }
+  // what the cancels gave back is now in your balance
+  if (orders.length) ({ holdings } = await find(phrase, net))
+
   // plan: one step per pair of notes
   const plan: { holding: Holding; notes: Note[] }[] = []
   for (const h of holdings) for (let i = 0; i < h.notes.length; i += 2) plan.push({ holding: h, notes: h.notes.slice(i, i + 2) })
-  const steps: Step[] = plan.map(({ holding, notes }) => ({
-    label: `${show(notes.reduce((s, n) => s + n.amount, 0n), holding.decimals)} ${holding.symbol}`,
-    state: 'waiting',
-  }))
+  const steps: Step[] = [
+    ...cancels,
+    ...plan.map(({ holding, notes }) => ({
+      label: `${show(notes.reduce((s, n) => s + n.amount, 0n), holding.decimals)} ${holding.symbol}`,
+      state: 'waiting' as const,
+    })),
+  ]
+  const at = cancels.length // withdrawal i is step at + i
   onStep([...steps])
 
   for (let i = 0; i < plan.length; i++) {
     const { holding, notes } = plan[i]
-    steps[i] = { ...steps[i], state: 'working' }
+    steps[at + i] = { ...steps[at + i], state: 'working' }
     onStep([...steps])
     try {
       const amount = notes.reduce((s, n) => s + n.amount, 0n)
@@ -147,11 +215,11 @@ export async function rescue(
       const hash = await wallet.writeContract(request)
       const receipt = await pub.waitForTransactionReceipt({ hash, timeout: 120_000 })
       if (receipt.status !== 'success') throw new Error('The network rejected this withdrawal.')
-      steps[i] = { ...steps[i], state: 'done', hash }
+      steps[at + i] = { ...steps[at + i], state: 'done', hash }
     } catch (e) {
       const err = e as { shortMessage?: string; message?: string }
       const msg = err.shortMessage || err.message || 'failed'
-      steps[i] = { ...steps[i], state: 'failed', error: /insufficient funds|exceeds the balance/i.test(msg) ? 'Not enough ETH at your drop-off address for the network fee.' : msg.slice(0, 200) }
+      steps[at + i] = { ...steps[at + i], state: 'failed', error: /insufficient funds|exceeds the balance/i.test(msg) ? 'Not enough ETH at your drop-off address for the network fee.' : msg.slice(0, 200) }
       onStep([...steps])
       return steps
     }

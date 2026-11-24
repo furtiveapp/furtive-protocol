@@ -75,6 +75,10 @@ contract UniswapV4ForkTest is FurtiveVaultTest {
     PoolKey ethUsdg;
     PoolKey usdgMeme;
 
+    function _poolManager() internal pure override returns (address) {
+        return POOL_MANAGER;
+    }
+
     function setUp() public override {
         vm.createSelectFork("rh_testnet");
         super.setUp();

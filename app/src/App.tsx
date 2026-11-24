@@ -4,7 +4,7 @@ import { AnimatePresence, motion } from 'motion/react'
 import { accountFromPhrase, type Account } from '@sdk/wallet.mjs'
 import { Peeker, Screen, TopBar, ease } from '@/components/ui'
 import { forgetPhrase, initData, loadPhrase, savePhrase, telegramBack } from '@/lib/telegram'
-import { loadWallet, setAlerts, type Activity, type Wallet, warmUp } from '@/lib/furtive'
+import { loadWallet, setAlerts, txInFlight, type Activity, type Wallet, warmUp } from '@/lib/furtive'
 import type { MarketPool } from '@/lib/markets-api'
 import { findToken, units, type Token, checkToken } from '@/lib/market'
 import { Welcome, Backup, Restore } from '@/screens/Onboarding'
@@ -12,12 +12,17 @@ import { Home } from '@/screens/Home'
 import { Discover } from '@/screens/Discover'
 import { TokenPage } from '@/screens/TokenPage'
 import { TradeSheet } from '@/screens/Trade'
+import { HeldPicker, OrderSheet, OrdersList } from '@/screens/Orders'
+import { loadOrders, syncOrders, type OrderKind } from '@/lib/orders'
 import { AccountTab, ActivityTab, PhrasePage, PrivacyPage, Receipt, SignOutPage, TabBar, type Tab } from '@/screens/Tabs'
 
 type View = 'loading' | 'welcome' | 'backup' | 'restore' | 'app'
 type Page =
   | { kind: 'token'; pool: MarketPool }
   | { kind: 'trade'; token: Token; side?: 'buy' | 'sell'; amount?: string; auto?: boolean; expect?: string }
+  | { kind: 'order'; token: Token; start?: { kind?: OrderKind; pct?: number; amount?: string; portion?: number; auto?: boolean } }
+  | { kind: 'orders' }
+  | { kind: 'pick'; order: OrderKind }
   | { kind: 'receipt'; activity: Activity }
   | { kind: 'privacy' }
   | { kind: 'add' }
@@ -86,11 +91,13 @@ export default function App() {
   }, [])
 
   const refresh = useCallback(async () => {
-    if (!account) return
+    if (!account || txInFlight()) return
     setLoading(true)
     setError(null)
     try {
       setWallet(await loadWallet(account))
+      // orders that filled, expired or were cancelled show in Activity even off the Orders screen
+      if (loadOrders(account).length) syncOrders(account).catch(() => {})
     } catch (e) {
       setError(e instanceof Error ? e.message.split('\n')[0] : 'Could not reach the network.')
     } finally {
@@ -117,10 +124,26 @@ export default function App() {
     if (view !== 'app') return
     const q = new URLSearchParams(window.location.search)
     const open = q.get('open')
-    if (open === 'account' || open === 'activity' || open === 'add') {
+    if (open === 'account' || open === 'activity' || open === 'add' || open === 'orders') {
       window.history.replaceState(null, '', window.location.pathname)
-      if (open === 'add') push({ kind: 'add' })
+      if (open === 'add' || open === 'orders') push({ kind: open })
       else setTab(open)
+      return
+    }
+    // /stop or /tp in the chat, with no token named: pick from what this phone holds
+    const pick = q.get('pick')
+    if (pick === 'stop' || pick === 'take') {
+      window.history.replaceState(null, '', window.location.pathname)
+      push({ kind: 'pick', order: pick })
+      return
+    }
+    // Opened from /limit or /stop in the chat: the order screen, filled in
+    const orderAddr = q.get('order')
+    if (orderAddr) {
+      window.history.replaceState(null, '', window.location.pathname)
+      const k = q.get('kind')
+      const kind = k === 'limit' || k === 'stop' || k === 'take' ? k : undefined
+      findToken(orderAddr).then((token) => token && push({ kind: 'order', token, start: { kind, pct: Number(q.get('pct')) || undefined, amount: q.get('amount') || undefined, portion: Number(q.get('portion')) || undefined, auto: q.get('go') === '1' } }))
       return
     }
     const addr = q.get('trade')
@@ -193,6 +216,32 @@ export default function App() {
             )}
             {page.kind === 'phrase' && <PhrasePage phrase={phrase} onBack={pop} />}
             {page.kind === 'signout' && <SignOutPage onBack={pop} onConfirm={signOut} />}
+            {page.kind === 'pick' && (
+              <Screen>
+                <TopBar onBack={pop} />
+                <div className="px-5">{wallet ? <HeldPicker wallet={wallet} kind={page.order} onPick={(token) => (pop(), push({ kind: 'order', token, start: { kind: page.order } }))} /> : <div className="h-64 animate-pulse rounded-3xl bg-ink/[0.04]" />}</div>
+              </Screen>
+            )}
+            {page.kind === 'orders' && (
+              <Screen>
+                <TopBar onBack={pop} />
+                <div className="px-5">
+                  <OrdersList account={account} onRefresh={refresh} />
+                </div>
+              </Screen>
+            )}
+            {page.kind === 'order' && (
+              <Screen>
+                <TopBar onBack={tradeLocked ? undefined : pop} right={<button type="button" onClick={() => push({ kind: 'orders' })} className="px-3 text-[14px] font-medium text-muted">Your orders</button>} />
+                <div className="px-5 pb-10">
+                  {wallet ? (
+                    <OrderSheet account={account} wallet={wallet} token={page.token} start={page.start} onLock={setTradeLocked} onDone={() => (pop(), push({ kind: 'orders' }), refresh())} />
+                  ) : (
+                    <div className="h-64 animate-pulse rounded-3xl bg-ink/[0.04]" />
+                  )}
+                </div>
+              </Screen>
+            )}
             {page.kind === 'trade' && (
               <Screen>
                 <TopBar onBack={tradeLocked ? undefined : pop} />
@@ -204,6 +253,7 @@ export default function App() {
                       start={{ token: page.token, side: page.side ?? 'buy', amount: page.amount, auto: page.auto, expect: page.expect }}
                       onLock={setTradeLocked}
                       onRefresh={refresh}
+                      onOrder={(token) => push({ kind: 'order', token })}
                       onDone={() => {
                         pop()
                         setTab('home')
@@ -220,11 +270,11 @@ export default function App() {
         ) : (
           <motion.div key={`tab-${tab}`} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.25, ease }} className="mx-auto min-h-svh max-w-[460px]">
             {tab === 'home' && (
-              <Home account={account} phrase={phrase} wallet={wallet} loading={loading} error={error} onRefresh={refresh} onSignOut={() => push({ kind: 'signout' })} onSeeAll={() => setTab('activity')} />
+              <Home account={account} phrase={phrase} wallet={wallet} loading={loading} error={error} onRefresh={refresh} onSignOut={() => push({ kind: 'signout' })} onSeeAll={() => setTab('activity')} onOrder={(token) => push({ kind: 'order', token })} />
             )}
             {tab === 'discover' && <Discover onOpen={(pool) => push({ kind: 'token', pool })} onOpenTest={(token) => push({ kind: 'trade', token })} />}
             {tab === 'activity' && <ActivityTab account={account} onOpen={(activity) => push({ kind: 'receipt', activity })} />}
-            {tab === 'account' && <AccountTab address={wallet?.depositAddress ?? ''} holdings={held.map(({ address, symbol }) => ({ address, symbol }))} onPrivacy={() => push({ kind: 'privacy' })} onPhrase={() => push({ kind: 'phrase' })} onSignOut={() => push({ kind: 'signout' })} />}
+            {tab === 'account' && <AccountTab address={wallet?.depositAddress ?? ''} holdings={held.map(({ address, symbol }) => ({ address, symbol }))} onPrivacy={() => push({ kind: 'privacy' })} onPhrase={() => push({ kind: 'phrase' })} onSignOut={() => push({ kind: 'signout' })} onOrders={() => push({ kind: 'orders' })} />}
           </motion.div>
         )}
       </AnimatePresence>

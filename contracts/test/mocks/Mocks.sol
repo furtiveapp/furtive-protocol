@@ -39,6 +39,19 @@ contract MockERC20 {
 }
 
 /// @dev Pays `rateNum / rateDen` of assetOut per unit of assetIn, from its own stock.
+/// @dev Stands in for the Uniswap v4 PoolManager's storage reads.
+contract MockPoolManager {
+    mapping(bytes32 => bytes32) internal slots;
+
+    function set(bytes32 slot, bytes32 value) external {
+        slots[slot] = value;
+    }
+
+    function extsload(bytes32 slot) external view returns (bytes32) {
+        return slots[slot];
+    }
+}
+
 contract MockAdapter is ISwapAdapter {
     uint256 public rateNum = 1;
     uint256 public rateDen = 1;

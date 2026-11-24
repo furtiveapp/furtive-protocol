@@ -43,13 +43,18 @@ export function TabBar({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
 // ──────────────────────────────────────────────────────────────── activity
 
 const FILTERS: [string, Activity['kind'][]][] = [
-  ['All', ['add', 'send', 'buy', 'sell']],
-  ['Trades', ['buy', 'sell']],
+  ['All', ['add', 'send', 'buy', 'sell', 'order']],
+  ['Trades', ['buy', 'sell', 'order']],
   ['Sends', ['send']],
   ['Deposits', ['add']],
 ]
 
-export const activityTitle = (a: Activity) => (a.kind === 'add' ? 'Added to your balance' : a.kind === 'send' ? `Sent to ${short(a.to ?? '')}` : a.kind === 'buy' ? 'Bought privately' : 'Sold privately')
+export const activityTitle = (a: Activity) =>
+  a.kind === 'add' ? 'Added to your balance'
+  : a.kind === 'send' ? `Sent to ${short(a.to ?? '')}`
+  : a.kind === 'order' ? a.label ?? 'Order set'
+  : a.kind === 'buy' ? `Bought ${a.outSymbol && a.outSymbol !== 'ETH' ? `${a.outSymbol} ` : ''}privately`
+  : `Sold ${a.symbol && a.symbol !== 'ETH' ? `${a.symbol} ` : ''}privately`
 export const activityIcon = (a: Activity) => (a.kind === 'add' ? Icon.plus : a.kind === 'send' ? Icon.send : Icon.trade)
 
 export function ActivityTab({ account, onOpen }: { account: Acct; onOpen: (a: Activity) => void }) {
@@ -102,7 +107,7 @@ export function ActivityTab({ account, onOpen }: { account: Acct; onOpen: (a: Ac
                       <span className="block text-[12.5px] text-muted">{new Date(a.at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</span>
                     </span>
                     <span className="text-[15px] tabular">
-                      {a.kind === 'add' ? '+' : '−'}
+                      {a.kind === 'add' || a.incoming ? '+' : '−'}
                       {a.amount} {a.symbol ?? 'ETH'}
                     </span>
                   </motion.button>
@@ -140,7 +145,7 @@ export function Receipt({ a, onBack }: { a: Activity; onBack: () => void }) {
             <Peeker mood="happy" />
           </span>
           <p className="mt-5 text-[34px] leading-none font-medium tracking-[-0.04em] tabular">
-            {a.kind === 'add' ? '+' : '−'}
+            {a.kind === 'add' || a.incoming ? '+' : '−'}
             {a.amount} <span className="text-[18px] font-normal text-muted">{a.symbol ?? 'ETH'}</span>
           </p>
           <p className="mt-2 text-[14.5px] text-muted">{activityTitle(a)}</p>
@@ -161,7 +166,7 @@ export function Receipt({ a, onBack }: { a: Activity; onBack: () => void }) {
 
 // ───────────────────────────────────────────────────────────────── account
 
-export function AccountTab({ address, holdings, onPrivacy, onPhrase, onSignOut }: { address: string; holdings: { address: string; symbol: string }[]; onPrivacy: () => void; onPhrase: () => void; onSignOut: () => void }) {
+export function AccountTab({ address, holdings, onPrivacy, onPhrase, onSignOut, onOrders }: { address: string; holdings: { address: string; symbol: string }[]; onPrivacy: () => void; onPhrase: () => void; onSignOut: () => void; onOrders: () => void }) {
   const [alerts, setAlertsOn] = useState(() => {
     try {
       return localStorage.getItem('furtive.alerts') === '1'
@@ -231,6 +236,11 @@ export function AccountTab({ address, holdings, onPrivacy, onPhrase, onSignOut }
           <span className="flex items-center gap-1.5"><span className="size-1.5 rounded-full bg-[#3F8F5E]" />Nobody else holds it</span>
         </p>
       </section>
+
+      {/* Trading */}
+      <Group title="Trading">
+        <Item title="Orders" sub="Limit buys, stop-losses and take profits" onClick={onOrders} />
+      </Group>
 
       {/* Security */}
       <Group title="Security">

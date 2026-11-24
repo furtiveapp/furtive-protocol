@@ -21,6 +21,7 @@ contract DeployTestnet is Script {
         Groth16Verifier verifier = new Groth16Verifier();
         FurtiveVault vault = new FurtiveVault(
             address(verifier),
+            POOL_MANAGER,
             deployer, // testnet treasury
             30, // 0.30% swap fee
             FurtiveVault.BaseAsset(address(0), 1 ether, 50 ether),

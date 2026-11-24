@@ -10,8 +10,10 @@ const load = (url: string) =>
   (files[url] ??= fetch(url)
     .then((r) => {
       if (!r.ok || !r.body) throw new Error('The proof files did not load.')
-      // shipped gzipped (36% smaller); unpacked here as they arrive
-      return url.endsWith('.gz') ? new Response(r.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer() : r.arrayBuffer()
+      // shipped gzipped (36% smaller) and unpacked here as they arrive, unless the
+      // server already sent them with gzip encoding, which the browser unpacks itself
+      const packed = url.endsWith('.gz') && !/gzip/i.test(r.headers.get('content-encoding') || '')
+      return packed ? new Response(r.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer() : r.arrayBuffer()
     })
     .then((b) => new Uint8Array(b))
     .catch((e) => {

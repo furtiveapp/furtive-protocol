@@ -4,7 +4,7 @@ pragma solidity 0.8.28;
 import {Test} from "forge-std/Test.sol";
 import {FurtiveVault} from "../src/FurtiveVault.sol";
 import {Groth16Verifier} from "../src/verifiers/TransactVerifier.sol";
-import {MockERC20, MockAdapter, ReentrantAdapter} from "./mocks/Mocks.sol";
+import {MockERC20, MockAdapter, ReentrantAdapter, MockPoolManager} from "./mocks/Mocks.sol";
 
 /// @dev Every proof in this file is a real Groth16 proof made by the SDK
 ///      (test/ffi/furtive.mjs) against the development keys.
@@ -36,11 +36,20 @@ contract FurtiveVaultTest is Test {
         uint256 amount;
     }
 
+    MockPoolManager mockPm;
+
+    /// The PoolManager the vault reads trigger prices from (the fork test uses the real one).
+    function _poolManager() internal virtual returns (address) {
+        mockPm = new MockPoolManager();
+        return address(mockPm);
+    }
+
     function setUp() public virtual {
         Groth16Verifier verifier = new Groth16Verifier();
         usdg = new MockERC20("USDG", 6);
         vault = new FurtiveVault(
             address(verifier),
+            _poolManager(),
             treasury,
             30, // 0.30% swap fee
             FurtiveVault.BaseAsset(ETH, 10 ether, 100 ether),
@@ -231,6 +240,176 @@ contract FurtiveVaultTest is Test {
         vm.warp(e.deadline + 1);
         vm.expectRevert(FurtiveVault.Expired.selector);
         vault.transact(p, t, e);
+    }
+
+    // ──────────────────────────────────────────────────────────────── orders
+
+    bytes32 constant POOL = keccak256("eth-usdg pool");
+    bytes32 constant CANCEL_KEY = keccak256("alice's cancel key");
+
+    function test_limit_order_fills_and_the_proceeds_are_the_owners_note() public {
+        adapter.setRate(3_000e6, 1e18);
+        Note memory n = _deposit(alice, 11, 12, ETH, 1 ether);
+        Note memory proceeds = _note(31, 32, address(usdg), 0);
+        FurtiveVault.OrderTerms memory terms = _terms(address(usdg), 2_900e6, proceeds.npk, 0, 0, 0);
+        uint256 id = _placeOrder(n, terms);
+
+        assertEq(vault.held(ETH), 0, "the amount left the private balance");
+        assertEq(vault.escrowed(ETH), 1 ether, "and waits in the order");
+
+        // anyone holding the terms may fill; the filler earns nothing it was not allowed
+        vm.prank(bob);
+        vault.fillOrder(id, terms, address(adapter), "", "proceeds-note");
+        (, uint256 left,) = vault.orders(id);
+        assertEq(left, 0, "a filled order is gone");
+        assertEq(vault.escrowed(ETH), 0);
+        assertEq(vault.feesOwed(ETH), 0.003 ether);
+        assertEq(vault.held(address(usdg)), 2_991e6);
+
+        // the proceeds are a note only alice's key opens, and she can spend it
+        proceeds.amount = 2_991e6;
+        proceeds.commitment = _commit(proceeds.npk, address(usdg), proceeds.amount);
+        leaves.push(proceeds.commitment);
+        FurtiveVault.ExtData memory w = _withdrawExt(alice, address(0), 0);
+        (FurtiveVault.Proof memory p, FurtiveVault.Transaction memory t) = _prove(_one(proceeds), new Out[](0), address(usdg), 2_991e6, w);
+        vault.transact(p, t, w);
+        assertEq(usdg.balanceOf(alice), 1_000_000e6 + 2_991e6);
+    }
+
+    function test_an_order_fills_only_with_its_exact_terms() public {
+        adapter.setRate(3_000e6, 1e18);
+        Note memory n = _deposit(alice, 11, 12, ETH, 1 ether);
+        FurtiveVault.OrderTerms memory terms = _terms(address(usdg), 2_900e6, 777, 0, 0, 0);
+        uint256 id = _placeOrder(n, terms);
+
+        FurtiveVault.OrderTerms memory cheaper = terms;
+        cheaper.minOut = 1;
+        vm.expectRevert(FurtiveVault.TermsMismatch.selector);
+        vault.fillOrder(id, cheaper, address(adapter), "", "proceeds-note");
+
+        FurtiveVault.OrderTerms memory stolen = terms;
+        stolen.outNpk = 666;
+        vm.expectRevert(FurtiveVault.TermsMismatch.selector);
+        vault.fillOrder(id, stolen, address(adapter), "", "proceeds-note");
+
+        vm.expectRevert(FurtiveVault.TermsMismatch.selector);
+        vault.fillOrder(id, terms, address(adapter), "", "a different note");
+    }
+
+    function test_a_fill_below_the_limit_reverts_and_the_order_stays() public {
+        adapter.setRate(2_000e6, 1e18);
+        Note memory n = _deposit(alice, 11, 12, ETH, 1 ether);
+        FurtiveVault.OrderTerms memory terms = _terms(address(usdg), 2_900e6, 777, 0, 0, 0);
+        uint256 id = _placeOrder(n, terms);
+        vm.expectRevert(abi.encodeWithSelector(FurtiveVault.ShortOutput.selector, 1_994e6, 2_900e6));
+        vault.fillOrder(id, terms, address(adapter), "", "proceeds-note");
+        (, uint256 amount,) = vault.orders(id);
+        assertEq(amount, 1 ether);
+    }
+
+    function test_a_stop_waits_for_the_pool_price_to_reach_its_trigger() public {
+        adapter.setRate(3_000e6, 1e18);
+        Note memory n = _deposit(alice, 11, 12, ETH, 1 ether);
+        // fill only once the pool price is at or above 200
+        FurtiveVault.OrderTerms memory terms = _terms(address(usdg), 2_900e6, 777, 2, 200, 0);
+        uint256 id = _placeOrder(n, terms);
+        bytes32 slot = keccak256(abi.encode(POOL, uint256(6)));
+
+        _setPrice(slot, 150);
+        assertFalse(vault.triggerMet(terms));
+        vm.expectRevert(FurtiveVault.TriggerNotMet.selector);
+        vault.fillOrder(id, terms, address(adapter), "", "proceeds-note");
+
+        _setPrice(slot, 250);
+        assertTrue(vault.triggerMet(terms));
+        vault.fillOrder(id, terms, address(adapter), "", "proceeds-note");
+    }
+
+    function test_only_the_owner_cancels_before_expiry_and_the_funds_return_as_a_note() public {
+        Note memory n = _deposit(alice, 11, 12, ETH, 1 ether);
+        Note memory back = _note(41, 42, ETH, 0);
+        FurtiveVault.OrderTerms memory terms = _terms(address(usdg), 2_900e6, 777, 0, 0, back.npk);
+        uint256 id = _placeOrder(n, terms);
+
+        vm.prank(bob);
+        vm.expectRevert(FurtiveVault.NotCancellable.selector);
+        vault.cancelOrder(id, terms, keccak256("a guess"), "cancel-note");
+
+        vault.cancelOrder(id, terms, CANCEL_KEY, "cancel-note");
+        assertEq(vault.escrowed(ETH), 0);
+        assertEq(vault.held(ETH), 1 ether, "back in the private balance");
+
+        back.amount = 1 ether;
+        back.commitment = _commit(back.npk, ETH, 1 ether);
+        leaves.push(back.commitment);
+        FurtiveVault.ExtData memory w = _withdrawExt(alice, address(0), 0);
+        (FurtiveVault.Proof memory p, FurtiveVault.Transaction memory t) = _prove(_one(back), new Out[](0), ETH, 1 ether, w);
+        uint256 before = alice.balance;
+        vault.transact(p, t, w);
+        assertEq(alice.balance, before + 1 ether);
+    }
+
+    function test_an_expired_order_cannot_fill_but_anyone_holding_the_terms_can_return_it() public {
+        adapter.setRate(3_000e6, 1e18);
+        Note memory n = _deposit(alice, 11, 12, ETH, 1 ether);
+        FurtiveVault.OrderTerms memory terms = _terms(address(usdg), 2_900e6, 777, 0, 0, 888);
+        uint256 id = _placeOrder(n, terms);
+        vm.warp(uint256(terms.expiry) + 1);
+
+        vm.expectRevert(FurtiveVault.Expired.selector);
+        vault.fillOrder(id, terms, address(adapter), "", "proceeds-note");
+
+        vm.prank(bob);
+        vault.cancelOrder(id, terms, bytes32(0), "cancel-note");
+        assertEq(vault.held(ETH), 1 ether, "returned to its owner, not to whoever cancelled");
+        assertEq(bob.balance, 0);
+    }
+
+    function test_the_filler_takes_only_the_fee_the_owner_allowed() public {
+        adapter.setRate(3_000e6, 1e18);
+        Note memory n = _deposit(alice, 11, 12, ETH, 1 ether);
+        FurtiveVault.OrderTerms memory terms = _terms(address(usdg), 2_800e6, 777, 0, 0, 0);
+        terms.fillerFee = 0.001 ether;
+        uint256 id = _placeOrder(n, terms);
+        vm.prank(bob);
+        vault.fillOrder(id, terms, address(adapter), "", "proceeds-note");
+        assertEq(bob.balance, 0.001 ether);
+        assertEq(vault.held(address(usdg)), 2_988e6, "0.996 ETH sold after the 0.3% fee and the filler's 0.001");
+    }
+
+    function _terms(address assetOut, uint256 minOut, uint256 outNpk, uint8 trigger, uint160 price, uint256 cancelNpk)
+        internal
+        view
+        returns (FurtiveVault.OrderTerms memory t)
+    {
+        t.assetOut = assetOut;
+        t.minOut = minOut;
+        t.outNpk = outNpk;
+        t.outNoteHash = keccak256("proceeds-note");
+        t.cancelNpk = cancelNpk == 0 ? 999 : cancelNpk;
+        t.cancelNoteHash = keccak256("cancel-note");
+        t.cancelKeyHash = keccak256(abi.encode(CANCEL_KEY));
+        t.expiry = uint64(block.timestamp + 7 days);
+        t.trigger = trigger;
+        t.poolId = POOL;
+        t.triggerSqrtPrice = price;
+        t.salt = 1;
+    }
+
+    /// Places an order with a real proof spending `n` in full.
+    function _placeOrder(Note memory n, FurtiveVault.OrderTerms memory terms) internal returns (uint256 id) {
+        FurtiveVault.ExtData memory e;
+        e.adapter = vault.ORDER_BOOK();
+        e.adapterData = abi.encode(vault.termsHash(terms), bytes("sealed terms"));
+        e.deadline = block.timestamp + 1 hours;
+        (FurtiveVault.Proof memory p, FurtiveVault.Transaction memory t) = _prove(_one(n), new Out[](0), n.asset, n.amount, e);
+        id = vault.nextOrderId();
+        vault.transact(p, t, e);
+        _recordOutputs(t);
+    }
+
+    function _setPrice(bytes32 slot, uint160 price) internal {
+        mockPm.set(slot, bytes32(uint256(price)));
     }
 
     // ───────────────────────────────────────────────────────────── helpers

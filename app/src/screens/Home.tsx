@@ -8,6 +8,7 @@ import { addFunds, depositable, ethUsd, friendly, loadActivity, logActivity, sen
 import { eth, parseAmount, short } from '@/lib/format'
 import { notify, openLink, pasteText, tap, telegramBack } from '@/lib/telegram'
 import { checkToken, findToken, units, type Check as TokenCheck, type Token } from '@/lib/market'
+import { activityIcon, activityTitle } from './Tabs'
 import { Avatar, TradeSheet } from './Trade'
 
 const fmtEth = (n: number) => (n === 0 ? '0' : n.toLocaleString('en-US', { maximumFractionDigits: 6 }))
@@ -25,6 +26,7 @@ export function Home({
   onRefresh,
   onSignOut,
   onSeeAll,
+  onOrder,
 }: {
   account: Account
   phrase: string
@@ -34,6 +36,7 @@ export function Home({
   onRefresh: () => void
   onSignOut: () => void
   onSeeAll: () => void
+  onOrder?: (t: Token) => void
 }) {
   const [sheet, setSheet] = useState<SheetName>(null)
   const [price, setPrice] = useState<number | null>(null)
@@ -49,13 +52,20 @@ export function Home({
     if (!wallet) return
     let live = true
     const entries = [...wallet.balance.entries()].filter(([a, v]) => a !== 0n && v > 0n)
+    type Held = { token: Token; amount: bigint; check: TokenCheck | null }
+    // rows appear as soon as each token is known; its safety check fills in after,
+    // keeping the last check meanwhile, so nothing pops in late or blinks
     Promise.all(
       entries.map(async ([a, amount]) => {
         const token = await findToken('0x' + a.toString(16).padStart(40, '0'))
-        if (!token) return null
-        return { token, amount, check: await checkToken(token).catch(() => null) }
+        return token ? { token, amount, check: null } : null
       }),
-    ).then((l) => live && setHoldings(l.filter(Boolean) as { token: Token; amount: bigint; check: TokenCheck | null }[]))
+    ).then((l) => {
+      if (!live) return
+      const rows = l.filter(Boolean) as Held[]
+      setHoldings((prev) => rows.map((r) => ({ ...r, check: prev.find((p) => p.token.address === r.token.address)?.check ?? null })))
+      Promise.all(rows.map((r) => checkToken(r.token).catch(() => null))).then((checks) => live && setHoldings(rows.map((r, i) => ({ ...r, check: checks[i] }))))
+    })
     return () => {
       live = false
     }
@@ -235,10 +245,10 @@ export function Home({
                   <motion.li key={a.hash} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.04, duration: 0.4, ease }}>
                     <button type="button" onClick={() => openLink(explorerTx(a.hash))} className="w-full text-left">
                       <Row
-                        icon={<span className="grid size-10 place-items-center rounded-[13px] bg-paper-2">{a.kind === 'add' ? Icon.plus : a.kind === 'send' ? Icon.send : Icon.trade}</span>}
-                        title={a.kind === 'add' ? 'Added' : a.kind === 'send' ? `Sent to ${short(a.to ?? '')}` : a.kind === 'buy' ? 'Bought privately' : 'Sold privately'}
+                        icon={<span className="grid size-10 place-items-center rounded-[13px] bg-paper-2">{activityIcon(a)}</span>}
+                        title={activityTitle(a)}
                         sub={when(a.at)}
-                        right={<span className="text-[15px] tabular">{a.kind === 'add' ? '+' : '−'}{mask(a.amount)} {a.symbol ?? 'ETH'}</span>}
+                        right={<span className="text-[15px] tabular">{a.kind === 'add' || a.incoming ? '+' : '−'}{mask(a.amount)} {a.symbol ?? 'ETH'}</span>}
                       />
                     </button>
                   </motion.li>
@@ -251,7 +261,7 @@ export function Home({
       </div>
 
       <Sheet open={sheet === 'trade'} onClose={close} locked={tradeLocked}>
-        {wallet && <TradeSheet key={tradeStart?.token.address ?? 'pick'} account={account} wallet={wallet} start={tradeStart} onLock={setTradeLocked} onDone={close} onRefresh={onRefresh} />}
+        {wallet && <TradeSheet key={tradeStart?.token.address ?? 'pick'} account={account} wallet={wallet} start={tradeStart} onLock={setTradeLocked} onDone={close} onRefresh={onRefresh} onOrder={onOrder && ((t) => (close(), onOrder(t)))} />}
       </Sheet>
       <Sheet open={sheet === 'add'} onClose={close}>
         {wallet && <AddSheet account={account} wallet={wallet} onDone={close} />}
@@ -284,7 +294,7 @@ function when(at: number) {
 
 function GetStarted({ onAdd }: { onAdd: () => void }) {
   const steps = [
-    ['Add testnet ETH', 'Send a little to your deposit address.'],
+    ['Get free test ETH', 'From the Robinhood Chain faucet, sent to your deposit address.'],
     ['Move it in', 'It joins the shared pool, where nobody on the chain can tell it is yours.'],
     ['Trade or send privately', 'Buy any token on Robinhood Chain, and nobody on the chain can tell it was you.'],
   ]
@@ -397,6 +407,9 @@ export function AddSheet({ account, wallet, onDone }: { account: Account; wallet
     <div className="pb-2">
       <h2 className="text-[24px] tracking-[-0.03em]">Add funds</h2>
       <p className="mt-1.5 text-[14.5px] leading-relaxed text-muted">Send ETH on Robinhood Chain to this address from any wallet or exchange. It moves into your private balance by itself, minus a tiny network fee for the move.</p>
+      <button type="button" onClick={() => (tap('light'), openLink('https://faucet.testnet.chain.robinhood.com'))} className="mt-3 text-[14px] font-medium text-ink underline decoration-ink/30 underline-offset-4">
+        Need test ETH? Get it free from the Robinhood Chain faucet
+      </button>
 
       <div className="mt-6 flex items-center gap-4">
         <div className="size-[104px] shrink-0 overflow-hidden rounded-[14px]">
@@ -523,7 +536,11 @@ function SendSheet({ account, wallet, price, onLock, onDone }: { account: Accoun
             </button>
           </motion.p>
         )}
-        {done && <Button className="mt-8" onClick={onDone}>Done</Button>}
+        {done && (
+          <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.35, duration: 0.35, ease }} className="w-full">
+            <Button className="mt-8" onClick={onDone}>Done</Button>
+          </motion.div>
+        )}
       </div>
     )
   }

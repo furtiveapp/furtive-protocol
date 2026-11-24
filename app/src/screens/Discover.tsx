@@ -26,13 +26,24 @@ export function Discover({ onOpen, onOpenTest }: { onOpen: (p: MarketPool) => vo
     listedTokens().then(setTest).catch(() => {})
   }, [])
 
+  // A busy market feed is retried by itself, every few seconds, until the list loads.
+  const [attempt, setAttempt] = useState(0)
   useEffect(() => {
     if (data[list]) return
-    setError(false)
+    let live = true
+    let timer: ReturnType<typeof setTimeout> | undefined
     ;(list === 'stocks' ? marketStocks() : marketList(list))
-      .then((pools) => setData((d) => ({ ...d, [list]: pools })))
-      .catch(() => setError(true))
-  }, [list, data])
+      .then((pools) => live && (setError(false), setData((d) => ({ ...d, [list]: pools }))))
+      .catch(() => {
+        if (!live) return
+        setError(true)
+        timer = setTimeout(() => live && setAttempt((a) => a + 1), Math.min(3000 * 2 ** Math.min(attempt, 3), 20_000))
+      })
+    return () => {
+      live = false
+      if (timer) clearTimeout(timer)
+    }
+  }, [list, data, attempt])
 
   useEffect(() => {
     const q = query.trim()
@@ -46,6 +57,8 @@ export function Discover({ onOpen, onOpenTest }: { onOpen: (p: MarketPool) => vo
   }, [query])
 
   const rows = results ?? data[list]
+  // a practice trade goes to a deep test pool, so the first trade always works
+  const practice = test.find((t) => t.stock) ?? null
 
   return (
     <div className="px-5 pb-28">
@@ -69,9 +82,9 @@ export function Discover({ onOpen, onOpenTest }: { onOpen: (p: MarketPool) => vo
         )}
       </div>
 
-      {!results && test.length > 0 && (
-        <button type="button" onClick={() => (tap('light'), onOpenTest(test[0]))} className="mt-3 block px-1 text-left text-[13.5px] text-muted">
-          New here? Practice a private trade with <span className="font-medium text-ink underline underline-offset-4">{test[0].symbol}</span>, a test token.
+      {!results && practice && (
+        <button type="button" onClick={() => (tap('light'), onOpenTest(practice))} className="mt-3 block px-1 text-left text-[13.5px] text-muted">
+          New here? Practice a private trade with <span className="font-medium text-ink underline underline-offset-4">{practice.symbol}</span> on testnet.
         </button>
       )}
 
@@ -87,7 +100,7 @@ export function Discover({ onOpen, onOpenTest }: { onOpen: (p: MarketPool) => vo
       )}
 
       <div className="mt-3">
-        {error && !rows && <p className="py-8 text-center text-[14px] text-muted">Market data is taking a moment. Pull down or switch lists to try again.</p>}
+        {error && !rows && <p className="py-8 text-center text-[14px] text-muted">Market data is busy for a moment. Trying again by itself.</p>}
         {!results && list === 'stocks' && <p className="px-1 pt-1 pb-2 text-[12.5px] text-muted-ink">Real prices from Robinhood Chain. Trade them privately on testnet now.</p>}
         {!rows && !error && (
           <div className="space-y-1">

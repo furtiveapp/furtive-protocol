@@ -8,12 +8,12 @@ import { accountFromPhrase, sealNote, decoyNote } from '../src/wallet.mjs'
 import { readVault, findNotes, balances } from '../src/chain.mjs'
 
 const RPC = 'https://rpc.testnet.chain.robinhood.com'
-const VAULT = '0x4136881594De8661b0d4F005AdAFbce67F2FD018'
-const ADAPTER = '0xAE13eC8f44F7201764Ba411d716B323DE1174aEe'
+const VAULT = '0x75843C1a45D75F3a1768DbBD191DC7939E3731f5'
+const ADAPTER = '0x9A14Df1Ab1137954b2913C54D60bF740a95A7E89'
 const QUOTER = '0x520B8fC1a687eeD97Ad4015c4242A2111d8332aE'
-const PEEK = '0x05484528197eE66b5165F61521aA4652d6fA8CB1'
+const PEEK = '0xAe3917FD6bF7cf6dD378cd4ba3110BeEd841959f'
 const ZERO = '0x0000000000000000000000000000000000000000'
-const FROM = 156050534n
+const FROM = 157178232n
 const RELAYER_URL = process.env.RELAYER_URL || 'http://127.0.0.1:8787'
 const chain = defineChain({ id: 46630, name: 'RH testnet', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: [RPC] } } })
 const pub = createPublicClient({ chain, transport: http(RPC) })

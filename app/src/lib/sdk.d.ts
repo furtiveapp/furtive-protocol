@@ -42,3 +42,18 @@ declare module '@sdk/chain.mjs' {
   export function findNotes(account: unknown, state: { leaves: Leaf[]; spent: Set<bigint> }): Promise<OwnedNote[]>
   export function balances(notes: OwnedNote[]): Map<bigint, bigint>
 }
+
+declare module '@sdk/orders.mjs' {
+  import type { Account } from '@sdk/wallet.mjs'
+  export type OrderTerms = {
+    assetOut: `0x${string}`; minOut: bigint; outNpk: bigint; outNoteHash: `0x${string}`; cancelNpk: bigint; cancelNoteHash: `0x${string}`
+    cancelKeyHash: `0x${string}`; expiry: bigint; trigger: number; poolId: `0x${string}`; triggerSqrtPrice: bigint; fillerFee: bigint; salt: bigint
+  }
+  export const TRIGGER: { none: 0; atOrBelow: 1; atOrAbove: 2 }
+  export function termsHash(terms: OrderTerms): bigint
+  export function openData(viewKey: CryptoKey, hex: `0x${string}`): Promise<unknown | null>
+  export function prepareOrder(
+    account: Account,
+    o: { assetIn: string; amount: bigint; assetOut: string; minOut: bigint; expiry: number; trigger?: number; poolId?: `0x${string}`; triggerSqrtPrice?: bigint; fillerFee?: bigint },
+  ): Promise<{ terms: OrderTerms; termsHash: bigint; sealedTerms: `0x${string}`; cancelKey: `0x${string}`; outSealed: `0x${string}`; backSealed: `0x${string}`; adapterData: `0x${string}` }>
+}

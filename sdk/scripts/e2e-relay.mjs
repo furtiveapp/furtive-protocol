@@ -10,8 +10,8 @@ import { newPhrase, accountFromPhrase, sealNote, decoyNote } from '../src/wallet
 import { readVault, findNotes, balances } from '../src/chain.mjs'
 
 const RPC = 'https://rpc.testnet.chain.robinhood.com'
-const VAULT = '0x4136881594De8661b0d4F005AdAFbce67F2FD018'
-const FROM_BLOCK = 156050534n
+const VAULT = '0x75843C1a45D75F3a1768DbBD191DC7939E3731f5'
+const FROM_BLOCK = 157178232n
 const RELAYER_URL = process.env.RELAYER_URL || 'http://127.0.0.1:8787'
 const ZERO = '0x0000000000000000000000000000000000000000'
 const chain = defineChain({ id: 46630, name: 'RH testnet', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: [RPC] } } })

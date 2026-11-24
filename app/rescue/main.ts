@@ -38,12 +38,13 @@ if (location.protocol === 'file:') $('foot').textContent = 'This saved copy work
 let phrase = ''
 let found: Found | null = null
 let poll: ReturnType<typeof setInterval> | null = null
-const withdrawals = () => (found ? found.holdings.reduce((n, h) => n + Math.ceil(h.notes.length / 2), 0) : 0)
+const withdrawals = () => (found ? found.holdings.reduce((n, h) => n + Math.ceil(h.notes.length / 2), 0) + found.orders.length * 2 : 0) // a cancel, and the withdrawal of what it returns
 const needed = () => (found ? BigInt(withdrawals()) * found.feePerWithdrawal + 21_000n * found.feePerWithdrawal / 450_000n : 0n)
 
 function renderHoldings() {
   if (!found) return
   const rows = found.holdings.map((h) => `<div class="row"><span>${h.symbol}</span><span>${show(h.amount, h.decimals)}</span></div>`)
+  for (const o of found.orders) rows.push(`<div class="row"><span>${o.symbol} <span class="muted">in an open order, cancelled first</span></span><span>${show(o.amount, o.decimals)}</span></div>`)
   if (found.feeBalance > 0n) rows.push(`<div class="row"><span class="muted">Waiting at your drop-off address</span><span>${show(found.feeBalance, 18)} ETH</span></div>`)
   $('holdings').innerHTML = rows.join('') || '<p class="muted">This account has nothing in the vault.</p>'
 }
